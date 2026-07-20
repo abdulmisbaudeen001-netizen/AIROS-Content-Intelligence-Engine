@@ -1,22 +1,25 @@
 """
 AIROS Content Intelligence Engine
-Main entry point — FastAPI application.
+Main entry point — FastAPI application deployed on Render.
 
 Endpoints:
   GET  /                    Health check
   GET  /auth/url            Get Google OAuth2 consent URL
-  GET  /auth/callback       OAuth2 callback (completes setup)
+  GET  /auth/callback       OAuth2 callback — Google redirects here after consent
+  GET  /auth/status         Check if Blogger is authorized
   POST /run/{window}        Manually trigger a publishing window
-  GET  /status              Current workflow states
+  POST /run/topic/{topic}   Run pipeline for a specific topic
+  GET  /status              Active workflow states
   GET  /articles            Recent published articles
-  GET  /queue               Publication queue
-  GET  /insights            Learning insights
+  GET  /queue               Publication retry queue
+  GET  /insights            Learning insights from past performance
 """
 
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse
 
 from database.connection import init_db, SessionLocal
 from database import repository
@@ -65,28 +68,47 @@ def health():
 
 
 # ---------------------------------------------------------------------------
-# OAuth2 Setup
+# OAuth2 — Blogger authorization
+# One-time setup. After completion, tokens are saved and auto-refreshed.
 # ---------------------------------------------------------------------------
 
 @app.get("/auth/url")
 def get_auth_url():
-    """Step 1: Get the Google consent page URL."""
+    """
+    Step 1 — Get the Google consent URL.
+    Visit this URL in your browser to authorize AIROS to publish to Blogger.
+    """
+    from config import GOOGLE_REDIRECT_URI
     url = blogger.get_auth_url()
-    return {"auth_url": url, "instruction": "Open this URL in your browser to authorize AIROS."}
+    return {
+        "auth_url": url,
+        "redirect_uri_configured": GOOGLE_REDIRECT_URI,
+        "instruction": "Open auth_url in your browser. Google will redirect back to /auth/callback.",
+    }
 
 
 @app.get("/auth/callback")
 def auth_callback(code: str = Query(...)):
-    """Step 2: Google redirects here after user consents."""
+    """
+    Step 2 — Google redirects here with an authorization code.
+    AIROS exchanges the code for tokens and saves them automatically.
+    This endpoint must be registered in Google Cloud Console as an authorized redirect URI.
+    """
     success = blogger.exchange_code(code)
     if success:
-        return {"status": "success", "message": "AIROS is now authorized to publish to Blogger."}
-    raise HTTPException(status_code=400, detail="OAuth2 code exchange failed.")
+        return {
+            "status": "success",
+            "message": "AIROS is now authorized to publish to Blogger. You will not need to do this again.",
+        }
+    raise HTTPException(status_code=400, detail="OAuth2 code exchange failed. Check logs.")
 
 
 @app.get("/auth/status")
 def auth_status():
-    return {"authenticated": blogger.is_authenticated()}
+    return {
+        "authenticated": blogger.is_authenticated(),
+        "message": "Ready to publish." if blogger.is_authenticated() else "Not authorized. Visit /auth/url to complete setup.",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -95,41 +117,47 @@ def auth_status():
 
 @app.post("/run/{window}")
 def run_window(window: str):
-    """Manually trigger a publishing window: morning | afternoon | evening | general"""
+    """
+    Manually trigger a publishing window.
+    window: morning | afternoon | evening | general
+    Runs in background — returns immediately.
+    """
     valid = {"morning", "afternoon", "evening", "general"}
     if window not in valid:
-        raise HTTPException(status_code=400, detail=f"Invalid window. Choose from: {valid}")
+        raise HTTPException(status_code=400, detail=f"Invalid window. Use one of: {sorted(valid)}")
 
-    import threading
     def _run():
         orchestrator.run_publishing_window(window)
 
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
-    return {"status": "started", "window": window, "message": "Publishing run started in background."}
+    threading.Thread(target=_run, daemon=True, name=f"window-{window}").start()
+    return {"status": "started", "window": window}
 
 
 @app.post("/run/topic/{topic}")
 def run_for_topic(topic: str):
-    """Run the pipeline for a specific topic (debugging / manual override)."""
-    import threading
+    """
+    Run the full pipeline for a specific topic.
+    Useful for testing or manual article creation.
+    """
     from agents.trend_agent import TopicOpportunity
 
     def _run():
         opportunity = TopicOpportunity(
-            title=topic, category="General",
-            trend_score=80.0, opportunity_score=80.0,
-            source_urls=[], summary="Manual trigger",
+            title=topic,
+            category="General",
+            trend_score=80.0,
+            opportunity_score=80.0,
+            source_urls=[],
+            summary="Manual trigger",
         )
         orchestrator._run_single_article("manual", opportunity, "general")
 
-    threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=_run, daemon=True, name=f"topic-{topic[:20]}").start()
     return {"status": "started", "topic": topic}
 
 
 # ---------------------------------------------------------------------------
-# Status & monitoring
+# Monitoring
 # ---------------------------------------------------------------------------
 
 @app.get("/status")
@@ -144,6 +172,7 @@ def status():
                 "window": w.window,
                 "completed": w.completed,
                 "failed_stages": w.failed_stages,
+                "error": w.error,
             }
             for wid, w in active.items()
         ],
@@ -187,6 +216,10 @@ def publication_queue():
 def learning_insights():
     return long_memory.get_all_insights()
 
+
+# ---------------------------------------------------------------------------
+# Entry point — Render uses uvicorn directly via start command
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn

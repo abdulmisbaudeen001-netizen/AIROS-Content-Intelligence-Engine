@@ -1,24 +1,40 @@
 """
 AIROS Content Intelligence Engine (ACIE)
-Central configuration — all settings live here, nothing is hard-coded elsewhere.
+Central configuration — all values are read from Render environment variables.
+No defaults for secrets. If a required variable is missing, the system raises
+a clear error at startup rather than running silently with wrong values.
 """
 
 import os
-from dataclasses import dataclass, field
 from typing import List
+
+
+def _require(key: str) -> str:
+    """Read a required environment variable. Raises if missing or empty."""
+    value = os.environ.get(key, "").strip()
+    if not value:
+        raise EnvironmentError(
+            f"Required environment variable '{key}' is not set. "
+            f"Add it in Render → your service → Environment."
+        )
+    return value
+
+
+def _optional(key: str, default: str = "") -> str:
+    return os.environ.get(key, default).strip()
 
 
 # ---------------------------------------------------------------------------
 # LLM / OpenRouter
 # ---------------------------------------------------------------------------
 
-OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_API_KEY: str = _require("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
 
-# Primary route — OpenRouter free router picks best available free model
+# Primary — OpenRouter free router picks best available free model
 LLM_PRIMARY_MODEL: str = "openrouter/auto"
 
-# Explicit fallback chain used when primary fails
+# Explicit fallback chain when primary fails
 LLM_FALLBACK_CHAIN: List[str] = [
     "deepseek/deepseek-chat-v3-0324:free",   # DeepSeek V4 Flash free
     "tencent/hunyuan-a13b-instruct:free",     # Tencent Hy3 free
@@ -35,20 +51,27 @@ LLM_MAX_RETRIES: int = 3
 # Blogger / Google OAuth2
 # ---------------------------------------------------------------------------
 
-GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_REDIRECT_URI: str = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/callback")
-BLOGGER_BLOG_ID: str = os.getenv("BLOGGER_BLOG_ID", "")
+GOOGLE_CLIENT_ID: str = _require("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET: str = _require("GOOGLE_CLIENT_SECRET")
+BLOGGER_BLOG_ID: str = _require("BLOGGER_BLOG_ID")
 
-# Token storage — persisted after first OAuth2 flow
-TOKEN_FILE: str = os.getenv("TOKEN_FILE", ".acie_tokens.json")
+# Render service URL — set this in Render environment as your full service URL
+# Example: https://airos-engine.onrender.com
+RENDER_SERVICE_URL: str = _optional("RENDER_SERVICE_URL", "http://localhost:8000")
+GOOGLE_REDIRECT_URI: str = f"{RENDER_SERVICE_URL.rstrip('/')}/auth/callback"
+
+# Token file — OAuth2 tokens saved here after first authorization
+# On Render, use /tmp/ — it persists within the same instance
+TOKEN_FILE: str = _optional("TOKEN_FILE", "/tmp/.acie_tokens.json")
 
 
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
 
-DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///acie.db")
+# On Render: set DATABASE_URL to your PostgreSQL connection string
+# Render provides this automatically when you attach a PostgreSQL database
+DATABASE_URL: str = _require("DATABASE_URL")
 
 
 # ---------------------------------------------------------------------------
@@ -58,11 +81,11 @@ DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///acie.db")
 SCHEDULE_MORNING_HOUR: int = 7
 SCHEDULE_AFTERNOON_HOUR: int = 13
 SCHEDULE_EVENING_HOUR: int = 19
-SCHEDULE_TOPICS_PER_RUN: int = 2   # articles published per window
+SCHEDULE_TOPICS_PER_RUN: int = 2
 
 
 # ---------------------------------------------------------------------------
-# Quality thresholds — articles below these scores are rejected / revised
+# Quality thresholds
 # ---------------------------------------------------------------------------
 
 MIN_QUALITY_SCORE: int = 80
@@ -79,11 +102,8 @@ MIN_READABILITY_SCORE: int = 70
 MAX_SOURCES_PER_TOPIC: int = 8
 MIN_SOURCES_PER_TOPIC: int = 3
 REQUEST_TIMEOUT_SECONDS: int = 30
-USER_AGENT: str = (
-    "Mozilla/5.0 (compatible; AIROSBot/1.0; +https://airos.news)"
-)
+USER_AGENT: str = "Mozilla/5.0 (compatible; AIROSBot/1.0; +https://airos.news)"
 
-# RSS feeds monitored by the Trend Discovery Agent
 RSS_FEEDS: List[str] = [
     "https://feeds.bbci.co.uk/news/rss.xml",
     "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
@@ -102,7 +122,6 @@ RSS_FEEDS: List[str] = [
     "https://rss.cnn.com/rss/edition.rss",
 ]
 
-# Trend search engine scraping targets
 TREND_SEARCH_URLS: List[str] = [
     "https://trends.google.com/trending?geo=US",
     "https://trends.google.com/trending?geo=GB",
@@ -124,9 +143,9 @@ ARTICLE_EDITORIAL_VOICE: str = (
 
 
 # ---------------------------------------------------------------------------
-# Deployment
+# Server
 # ---------------------------------------------------------------------------
 
-APP_HOST: str = os.getenv("APP_HOST", "0.0.0.0")
-APP_PORT: int = int(os.getenv("APP_PORT", "8000"))
-DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
+APP_HOST: str = "0.0.0.0"
+APP_PORT: int = int(_optional("PORT", "8000"))   # Render sets PORT automatically
+DEBUG: bool = _optional("DEBUG", "false").lower() == "true"
